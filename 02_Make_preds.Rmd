@@ -1,0 +1,227 @@
+---
+title: "Make Predictions"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+```{r load_libraries}
+library(tidyverse)
+library(ggthemes)
+library(gridExtra)
+library(GGally)
+library(tidymodels)
+library(glmnet)
+library(kernlab)
+library(here)
+
+acc <- function(confusion_matrix) {
+  sum(diag(confusion_matrix)) / sum(confusion_matrix)
+}
+
+select <- dplyr::select
+```
+
+
+```{r load_tr_data}
+
+
+train <- read.csv(here("data", "training.csv"))
+
+
+# To remove
+train %>%
+  filter(col1 < 1) %>%
+  dim()
+train <- train %>%
+  filter(col1 >= 1)
+```
+
+
+
+
+```{r}
+test <- read.csv(here("data", "testing.csv"))
+dim(test)
+# To remove
+test %>%
+  filter(col1 < 1) %>%
+  dim()
+test <- test %>%
+  filter(col1 >= 1)
+```
+
+Convert to absorbance
+```{r abs}
+train[, 2:1061] <- log10(1 / train[, 2:1061])
+test <- log10(1 / test)
+```
+
+
+## Split and scale training data
+
+```{r split_scale}
+
+
+set.seed(1979)
+
+train <- train %>%
+  mutate(Diet = as.factor(Diet))
+tr <- initial_split(train,
+  prop = .5,
+  strata = Diet
+)
+train_data <- training(tr)
+test_data <- testing(tr)
+
+mn <- apply(train_data %>%
+  select(-Diet), 2, mean)
+sd <- apply(train_data %>%
+  select(-Diet), 2, sd)
+
+train_data[, -c(1)] <- sweep(train_data[, -c(1)], 2, mn, "-")
+train_data[, -c(1)] <- sweep(train_data[, -c(1)], 2, sd, "/")
+
+test_data[, -c(1)] <- sweep(test_data[, -c(1)], 2, mn, "-")
+test_data[, -c(1)] <- sweep(test_data[, -c(1)], 2, sd, "/")
+
+
+test <- sweep(test, 2, mn, "-")
+test <- sweep(test, 2, sd, "/")
+```
+
+# AC feature reduction
+
+
+```{r}
+unit <- (5010 - 925) / 1060
+
+xx <- c(1592, 1720, 2996, 3698, 3818)
+
+
+ac_region <- c(1:173, 206:537, 720:751)
+```
+
+
+
+
+
+
+
+```{r MR}
+
+
+library(BKPC)
+
+
+margRelv <- marginalRelevance(
+  train_data %>%
+    select(-Diet),
+  train_data$Diet
+)
+
+
+
+mr <- as_tibble(cbind(1:1060, t(margRelv$score))) %>%
+  rename(vars = V1, score = V2)
+```
+
+
+```{r}
+
+reject1 <- c(174:205)
+reject2 <- c(538:719)
+reject3 <- c(751:1060)
+c(
+  173 + which(mr[reject1, 2] == max(mr[reject1, 2])),
+  537 + which(mr[reject2, 2] == max(mr[reject2, 2])),
+  750 + which(mr[reject3, 2] == max(mr[reject3, 2]))
+)
+ac_region_plus <- c(ac_region, 205, 556, 952)
+```
+
+```{r select_columns}
+
+train_data <- train_data[, c(1, ac_region_plus + 1)]
+
+test_data <- test_data[, c(1, ac_region_plus + 1)]
+
+test <- test[, ac_region_plus]
+
+dim(train_data)
+dim(test_data)
+dim(test)
+```
+
+
+```{r}
+
+
+margRelv <- marginalRelevance(train_data %>% select(-Diet), train_data$Diet)
+
+mr <- as_tibble(cbind(1:(ncol(train_data) - 1), t(margRelv$score))) %>% rename(vars = V1, score = V2)
+
+
+
+
+train_data <- train_data[, c(TRUE, mr$score > 0.002)]
+
+test_data <- test_data[, c(TRUE, mr$score > 0.002)]
+
+test <- test[, mr$score > 0.002]
+```
+
+
+
+
+
+
+
+```{r GA_feats}
+theta.optimum <- readRDS("theta3.Rds")
+train_data <- train_data[, c(TRUE, theta.optimum == 1)]
+
+test_data <- test_data[, c(TRUE, theta.optimum == 1)]
+
+test <- test[, theta.optimum == 1]
+dim(train_data)
+dim(test_data)
+dim(test)
+
+identical(names(train_data)[2:71], names(test))
+```
+
+# Classifier
+
+
+```{r submitted}
+# ===================================
+fit_lda <- MASS::lda(Diet ~ .,
+  train_data,
+  prior = c(1, 1, 1) / 3
+)
+
+pred_lda <- fit_lda %>%
+  predict(test)
+
+pred_lda <- pred_lda$class
+
+
+write.csv(pred_lda, "test_prediction.csv")
+
+# ===================================
+
+check <- read.csv(here("data", "testing.csv"))
+
+# To remove
+check <- check %>%
+  filter(col1 >= 1)
+check <- log10(1 / check)
+check <- sweep(check, 2, mn, "-")
+check <- sweep(check, 2, sd, "/")
+identical(test$col2, check$col2)
+```
+
